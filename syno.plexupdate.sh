@@ -361,6 +361,7 @@ if [ "$?" -eq "0" ]; then
   NewVerFixd=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .items_fixed'  < <(printf '%s' "$PlexTvJson"))
   NewDwnlUrl=$(jq --arg DSMplexNID "$DSMplexNID" --arg ArchFamily "$ArchFamily" -r '.[].nas[] | select(.id == $DSMplexNID) | .releases[] | select(.build == "linux-"+$ArchFamily) | .url' < <(printf '%s' "$PlexTvJson"))
   NewPackage="${NewDwnlUrl##*/}"
+  NewPackageSha=$(jq --arg DSMplexNID "$DSMplexNID" --arg ArchFamily "$ArchFamily" -r '.[].nas[] | select(.id == $DSMplexNID) | .releases[] | select(.build == "linux-"+$ArchFamily) | .checksum // empty' < <(printf '%s' "$PlexTvJson"))
   # CALCULATE NEW PACKAGE AGE FROM RELEASE DATE
   PackageAge=$(((TodaysDate-NewVerDate)/86400))
 else
@@ -426,6 +427,39 @@ if /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
     fi
     /bin/wget -nv -c -nc -P "$SrceFolder/Archive/Packages/" "$NewDwnlUrl"                                      2>&1
     if [ "$?" -eq "0" ]; then
+      # VERIFY CHECKSUM (provided by Plex in API response)
+      if [ -n "$NewPackageSha" ]; then
+        _ShaCmd=""
+        if command -v sha1sum >/dev/null 2>&1; then
+          _ShaCmd="sha1sum"
+        elif command -v sha1 >/dev/null 2>&1; then
+          _ShaCmd="sha1"
+        elif command -v openssl >/dev/null 2>&1; then
+          _ShaCmd="openssl sha1"
+        fi
+        if [ -n "$_ShaCmd" ]; then
+          NewActualSha=$($_ShaCmd "$SrceFolder/Archive/Packages/$NewPackage" 2>/dev/null | sed -E 's/.*= //;s/ //g')
+          if [ -z "$NewActualSha" ]; then
+            printf '\n%s\n' "* WARNING: checksum tool produced no output - skipping verification"
+          elif [ "$NewPackageSha" = "$NewActualSha" ]; then
+            printf '%s\n' "* SHA-1 checksum verified"
+          else
+            printf '\n%s\n' "* Checksum MISMATCH!"
+            printf '%16s %s\n' "Expected:" "$NewPackageSha"
+            printf '%16s %s\n' "Actual:"   "$NewActualSha"
+            printf '\n%s\n' "* Package integrity check failed, skipping install.."
+            rm -f "$SrceFolder/Archive/Packages/$NewPackage"
+            printf "\n"
+            /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update task failed. Package checksum mismatch."}'
+            exit 1
+          fi
+        else
+          printf '\n%s\n' "* WARNING: No sha1sum/sha1/openssl found - skipping checksum verification"
+        fi
+      else
+        printf '%s\n' "* No checksum available from Plex API - skipping verification"
+      fi
+
       printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
       /usr/syno/bin/synopkg stop    "PlexMediaServer"
       printf "\n%s\n" "Installing PlexMediaServer update (JSON):"
